@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>MediaPipe + Three.js 粒子交互系统</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; color: white; }
+        canvas { display: block; }
+
+        /* UI 样式 */
+        #ui-container {
+            position: absolute; top: 20px; right: 20px; width: 220px;
+            background: rgba(0, 0, 0, 0.7); padding: 20px; border-radius: 12px;
+            backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1);
+        }
+        h3 { margin-top: 0; font-weight: 300; letter-spacing: 1px; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; font-size: 12px; margin-bottom: 8px; opacity: 0.8; }
+        
+        button {
+            width: 100%; padding: 10px; margin-bottom: 8px; cursor: pointer;
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+            color: white; border-radius: 4px; transition: 0.3s;
+        }
+        button:hover { background: rgba(255,255,255,0.3); }
+        button.active { background: #3498db; border-color: #3498db; }
+
+        input[type="range"], input[type="color"] { width: 100%; cursor: pointer; }
+
+        #fullscreen-btn {
+            position: absolute; bottom: 20px; right: 20px;
+            padding: 12px; background: rgba(255,255,255,0.1);
+            border-radius: 50%; border: 1px solid white; cursor: pointer;
+        }
+
+        /* 隐藏摄像头预览，仅作逻辑使用 */
+        #video-input { position: fixed; top: 10px; left: 10px; width: 160px; height: 120px; 
+                       border-radius: 8px; transform: scaleX(-1); border: 2px solid #3498db; }
+    </style>
+</head>
+<body>
+
+<video id="video-input"></video>
+
+<div id="ui-container">
+    <h3>模型预设</h3>
+    <div class="control-group">
+        <button onclick="changeModel('nebula')" id="btn-nebula" class="active">璀璨星云</button>
+        <button onclick="changeModel('fireworks')" id="btn-fireworks">节日烟花</button>
+        <button onclick="changeModel('saturn')" id="btn-saturn">土星环</button>
+        <button onclick="changeModel('flower')" id="btn-flower">几何花朵</button>
+    </div>
+
+    <div class="control-group">
+        <label>基础颜色</label>
+        <input type="color" id="base-color" value="#3498db" onchange="updateSettings()">
+    </div>
+    
+    <div class="control-group">
+        <label>粒子密度</label>
+        <input type="range" id="density" min="1000" max="50000" step="1000" value="15000" onchange="initParticles()">
+    </div>
+</div>
+
+<button id="fullscreen-btn" onclick="toggleFullscreen()">⛶</button>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/** * 系统配置 
+ */
+let scene, camera, renderer, mainParticles, backgroundParticles;
+let currentModel = 'nebula';
+let settings = { color: '#3498db', density: 15000, expansion: 1, targetRotX: 0, targetRotY: 0 };
+
+const videoElement = document.getElementById('video-input');
+
+/**
+ * 1. 初始化 Three.js 环境
+ */
+function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.z = 400;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    // 添加背景深空粒子
+    initBackground();
+    // 初始化主粒子
+    initParticles();
+
+    window.addEventListener('resize', onWindowResize);
+}
+
+function initBackground() {
+    const bgGeom = new THREE.BufferGeometry();
+    const bgCoords = [];
+    for(let i=0; i<8000; i++) {
+        bgCoords.push((Math.random()-0.5)*2000, (Math.random()-0.5)*2000, (Math.random()-0.5)*2000);
+    }
+    bgGeom.setAttribute('position', new THREE.Float32BufferAttribute(bgCoords, 3));
+    const bgMat = new THREE.PointsMaterial({ size: 1.5, color: 0x666666, transparent: true, opacity: 0.5 });
+    backgroundParticles = new THREE.Points(bgGeom, bgMat);
+    scene.add(backgroundParticles);
+}
+
+/**
+ * 2. 粒子模型预设逻辑
+ */
+function initParticles() {
+    if (mainParticles) scene.remove(mainParticles);
+    
+    const count = parseInt(document.getElementById('density').value);
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(count * 3);
+    const originalPos = new Float32Array(count * 3); // 存储基准位置用于扩散计算
+
+    for (let i = 0; i < count; i++) {
+        let x, y, z;
+        const i3 = i * 3;
+
+        if (currentModel === 'nebula') {
+            const radius = Math.random() * 200;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            x = radius * Math.sin(phi) * Math.cos(theta);
+            y = radius * Math.sin(phi) * Math.sin(theta);
+            z = radius * Math.cos(phi);
+        } 
+        else if (currentModel === 'fireworks') {
+            const theta = Math.random() * Math.PI * 2;
+            const r = Math.pow(Math.random(), 2) * 250;
+            x = r * Math.cos(theta);
+            y = r * Math.sin(theta);
+            z = (Math.random() - 0.5) * 50;
+        }
+        else if (currentModel === 'saturn') {
+            if (i < count * 0.3) { // 核心球体
+                const r = Math.random() * 80;
+                const t = Math.PI * 2 * Math.random();
+                const p = Math.acos(2 * Math.random() - 1);
+                x = r * Math.sin(p) * Math.cos(t);
+                y = r * Math.sin(p) * Math.sin(t);
+                z = r * Math.cos(p);
+            } else { // 环
+                const r = 120 + Math.random() * 80;
+                const t = Math.PI * 2 * Math.random();
+                x = r * Math.cos(t);
+                y = (Math.random() - 0.5) * 15;
+                z = r * Math.sin(t);
+            }
+        }
+        else if (currentModel === 'flower') {
+            const t = i * 0.1;
+            const r = 5 * Math.sqrt(t);
+            x = r * Math.cos(t);
+            z = r * Math.sin(t);
+            y = Math.sin(r * 0.05) * 50;
+        }
+
+        positions[i3] = x;
+        positions[i3+1] = y;
+        positions[i3+2] = z;
+        originalPos[i3] = x;
+        originalPos[i3+1] = y;
+        originalPos[i3+2] = z;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('basePos', new THREE.BufferAttribute(originalPos, 3));
+
+    const material = new THREE.PointsMaterial({
+        size: 2,
+        color: new THREE.Color(settings.color),
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+
+    mainParticles = new THREE.Points(geometry, material);
+    scene.add(mainParticles);
+}
+
+/**
+ * 3. MediaPipe 手部追踪
+ */
+const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+});
+
+hands.onResults((results) => {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const hand = results.multiHandLandmarks[0];
+        
+        // 1. 控制旋转 (使用手掌中心位置 0号点)
+        settings.targetRotY = (hand[0].x - 0.5) * 4;
+        settings.targetRotX = (hand[0].y - 0.5) * 4;
+
+        // 2. 控制扩散 (计算手掌中心[0]到中指指尖[12]的距离)
+        const dx = hand[0].x - hand[12].x;
+        const dy = hand[0].y - hand[12].y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        // 映射距离：握拳约0.1，张开约0.4 -> 映射到 0.5 到 3.0 倍率
+        settings.expansion = THREE.MathUtils.mapLinear(dist, 0.1, 0.4, 0.5, 3.5);
+    }
+});
+
+const cameraUtils = new Camera(videoElement, {
+    onFrame: async () => { await hands.send({ image: videoElement }); },
+    width: 640, height: 480
+});
+cameraUtils.start();
+
+/**
+ * 4. 动画循环与交互更新
+ */
+function animate() {
+    requestAnimationFrame(animate);
+
+    // 平滑旋转
+    mainParticles.rotation.y += (settings.targetRotY - mainParticles.rotation.y) * 0.1;
+    mainParticles.rotation.x += (settings.targetRotX - mainParticles.rotation.x) * 0.1;
+
+    // 实时更新颜色色相 (根据旋转角度)
+    const hsl = {};
+    mainParticles.material.color.getHSL(hsl);
+    const hueShift = (mainParticles.rotation.y * 0.2) % 1;
+    mainParticles.material.color.setHSL((0.5 + hueShift) % 1, hsl.s, hsl.l);
+
+    // 更新粒子扩散
+    const posAttr = mainParticles.geometry.attributes.position;
+    const basePosAttr = mainParticles.geometry.attributes.basePos;
+    for (let i = 0; i < posAttr.count; i++) {
+        posAttr.setXYZ(
+            i,
+            basePosAttr.getX(i) * settings.expansion,
+            basePosAttr.getY(i) * settings.expansion,
+            basePosAttr.getZ(i) * settings.expansion
+        );
+    }
+    posAttr.needsUpdate = true;
+
+    // 背景缓慢漂浮
+    backgroundParticles.rotation.y += 0.0005;
+
+    renderer.render(scene, camera);
+}
+
+/**
+ * 辅助函数
+ */
+function changeModel(type) {
+    currentModel = type;
+    document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    document.getElementById(`btn-${type}`).classList.add('active');
+    initParticles();
+}
+
+function updateSettings() {
+    settings.color = document.getElementById('base-color').value;
+    if(mainParticles) mainParticles.material.color.set(settings.color);
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen();
+    } else {
+        document.exitFullscreen();
+    }
+}
+
+// 启动执行
+initScene();
+animate();
+
+</script>
+</body>
+</html>
